@@ -1,0 +1,31 @@
+# Phase-runner local state (never published)
+.claude/
+phase-state.json
+phase-log.jsonl
+refusal-state.json
+phase-reviews/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
