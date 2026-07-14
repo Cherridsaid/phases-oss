@@ -1,5 +1,8 @@
 # phases-oss
 
+
+![phases-oss — guardrails for AI coding agents](docs/social.png)
+
 A phase-based workflow runner for AI coding agents — bounded phases,
 deterministic proofs, a consultative reviewer, and a bundled **Multidim**
 analysis engine (structured, multi-axis analysis before you write code).
@@ -170,6 +173,8 @@ Three hooks port the gates into an agent harness (Claude Code-style
   sanitized, *untrusted-marked* reminder of the active phase.
 
 ## Multidim (bundled analysis)
+
+![Multidim — structured analysis before you write a line](docs/multidim.png)
 
 phases-oss ships **Multidim**, a small analysis engine that turns a subject into
 a hierarchical grid (axes → sub-lenses) for a caller to fill in, then checks the
