@@ -20,5 +20,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit and integration tests (stdlib only)
         run: python run_tests.py
+      - name: Install the PEP 517 build frontend for the smoke test
+        run: python -m pip install --upgrade build
       - name: Packaging smoke test (wheel build + install + entry points)
         run: python smoke_install.py
