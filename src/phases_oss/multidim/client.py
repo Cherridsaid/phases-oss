@@ -73,7 +73,7 @@ def _exchange(requests: Sequence[Dict], timeout: float) -> List[Dict]:
     try:
         proc = subprocess.run(
             _server_command(), input=payload, capture_output=True, text=True,
-            encoding="utf-8", env=env, timeout=timeout,
+            encoding="utf-8", errors="replace", env=env, timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise MultidimClientError("could not run the Multidim server: %s" % exc)

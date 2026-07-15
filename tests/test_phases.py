@@ -224,6 +224,7 @@ class TestReview(PhaseTestBase):
     def test_records_verdict(self):
         self._init(audit="review")
         phases.approve(self.root)
+        phases.prove(self.root, runner=ok_runner)  # review rides on a green proof now
         verdict = phases.review(self.root, lambda ph: ReviewVerdict(ReviewVerdict.PASS, "ok"))
         self.assertTrue(verdict.passed)
         stored = phases.load_state(self.root).data["review_verdict"]
@@ -232,6 +233,7 @@ class TestReview(PhaseTestBase):
     def test_refus_persisted_not_raised(self):
         self._init(audit="review")
         phases.approve(self.root)
+        phases.prove(self.root, runner=ok_runner)
         verdict = phases.review(
             self.root, lambda ph: ReviewVerdict(ReviewVerdict.REFUS, "bad", "fix line 3")
         )
@@ -310,7 +312,9 @@ class TestClose(PhaseTestBase):
                 self.root, lesson="x", commit_sha="cafe",
                 verifier=pass_verifier, repo_guard=noop_repo_guard,
             )
-        phases.runtime(self.root, self._report("rt.md", "VERDICT: isolated " + "r" * 300))
+        # Verdicts are a closed vocabulary now: an invented token ("isolated")
+        # no longer counts, the runtime proof must declare a real PASS.
+        phases.runtime(self.root, self._report("rt.md", "VERDICT: PASS isolated " + "r" * 300))
         with self.assertRaises(PhaseError):  # human validation still missing
             phases.close(
                 self.root, lesson="x", commit_sha="cafe",
@@ -562,6 +566,7 @@ class TestJournalV2(PhaseTestBase):
     def test_review_event_carries_review_id(self):
         self._init(audit="review")
         phases.approve(self.root)
+        phases.prove(self.root, runner=ok_runner)
         phases.review(self.root, lambda ph: ReviewVerdict(ReviewVerdict.REFUS, "bad", "fix"))
         reviews = [e for e in self._events() if e["event_type"] == "review_recorded"]
         self.assertEqual(len(reviews), 1)

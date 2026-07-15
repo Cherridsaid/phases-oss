@@ -75,6 +75,34 @@ _REDACTORS = [
         r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b",
         "[REDACTED:gh-token]",
     ),
+    # Vendor token grammars, caught even OUTSIDE an assignment (pasted logs,
+    # curl lines, JSON). Anthropic before OpenAI: sk-ant-... must not be
+    # half-eaten by the generic sk-... rule.
+    _redactor(
+        "anthropic-key",
+        r"\bsk-ant-[A-Za-z0-9_\-]{8,}",
+        "[REDACTED:anthropic-key]",
+    ),
+    _redactor(
+        "openai-key",
+        r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{16,}",
+        "[REDACTED:openai-key]",
+    ),
+    _redactor(
+        "slack-token",
+        r"\bxox[baprs]-[A-Za-z0-9\-]{10,}",
+        "[REDACTED:slack-token]",
+    ),
+    _redactor(
+        "stripe-key",
+        r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}\b",
+        "[REDACTED:stripe-key]",
+    ),
+    _redactor(
+        "google-api-key",
+        r"\bAIza[0-9A-Za-z_\-]{16,}\b",
+        "[REDACTED:google-key]",
+    ),
     _redactor(
         "bearer",
         # Token charset covers base64/base64url so a token containing + / =
@@ -85,8 +113,14 @@ _REDACTORS = [
         "Bearer [REDACTED:token]",
     ),
     _redactor(
+        # The sensitive word may sit ANYWHERE in the variable name as a
+        # complete _-separated component: the old \b...\b anchors missed every
+        # prefixed UPPER_SNAKE env name (AWS_SECRET_ACCESS_KEY=, DB_PASSWORD=,
+        # OPENAI_API_KEY: ...), the most common way a secret reaches a log
+        # line. Requiring whole components keeps prose words that merely
+        # contain a keyword ("secretary:", "tokenizer:") out of the net.
         "secret-assign",
-        r"(?i)\b(api[_-]?key|secret|token|passwd|password)\b\s*[:=]\s*['\"]?[^\s'\"]{6,}['\"]?",
+        r"(?i)\b((?:[A-Z0-9]+[_\-])*(?:api[_-]?key|apikey|secret|token|passwd|password|credential)s?(?:[_\-][A-Z0-9]+)*)['\"]?\s*[:=]\s*['\"]?[^\s'\"]{6,}['\"]?",
         _keep_field,
     ),
     _redactor(

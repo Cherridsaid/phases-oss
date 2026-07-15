@@ -278,6 +278,85 @@ class TestPreToolUse(HookTestBase):
         self.assertEqual(out.getvalue(), "")
 
 
+class TestBashWriteMatrix(unittest.TestCase):
+    """Group G matrix: write tools are commands at a segment head, never
+    arguments. Covers the coreutils of the 2026-07-15 order, PowerShell
+    cmdlets, and wrapper/env prefixes."""
+
+    ALLOWED = [
+        # a write-tool word as an ARGUMENT is not a command
+        "pip install requests",
+        "pip3 install -r requirements.txt",
+        "npm install",
+        "npm install --save-dev jest",
+        "cargo install ripgrep",
+        "apt-get install -y jq",
+        "brew install node",
+        "gem install rails",
+        "go install ./...",
+        "man cp",
+        "man rm",
+        "which tee",
+        "grep -r install .",
+        "git log | grep mv",
+        "echo cp a b",
+        "git mv old.py new.py",  # git subcommand, not the mv tool
+        "sed s/a/b/ f.py",       # sed without -i reads only
+        "help touch",
+    ]
+    DENIED = [
+        # the same words as the COMMAND at a segment head
+        "cp a.py b.py",
+        "mv a.py b.py",
+        "rm out.py",
+        "rm -rf build",
+        "touch marker.txt",
+        "mkdir new_dir",
+        "rmdir old_dir",
+        "tee out.log",
+        "dd if=a of=b",
+        "install -m 644 a b",
+        "truncate -s 0 f.py",
+        "ln -s a b",
+        "patch -p1",
+        "sed -i s/a/b/ f.py",
+        "sed --in-place=.bak s/a/b/ f.py",
+        # behind wrappers and env prefixes
+        "sudo cp a b",
+        "sudo rm -rf build",
+        "xargs sed -i s/a/b/",
+        "env FOO=1 tee f.log",
+        "FOO=bar cp a b",
+        "nohup mv a b",
+        "/bin/cp a b",
+        "/usr/bin/install -m 755 x y",
+        # PowerShell (case-insensitive cmdlets)
+        "Set-Content -Path f.py -Value x",
+        "Add-Content f.py 'line'",
+        "Out-File -FilePath f.py",
+        "New-Item -ItemType File f.py",
+        "Remove-Item f.py",
+        "remove-item f.py",
+        "Copy-Item a.py b.py",
+        "Move-Item a.py b.py",
+        # a write hidden after an allowed head in a later segment
+        "pip install requests && cp a b",
+        "man cp; rm -rf src",
+    ]
+
+    def test_allowed_commands_are_not_writes(self):
+        for cmd in self.ALLOWED:
+            with self.subTest(cmd=cmd):
+                self.assertFalse(pre_tool_use.bash_writes_file(cmd),
+                                 "false positive: %r" % cmd)
+
+    def test_denied_commands_are_writes(self):
+        for cmd in self.DENIED:
+            with self.subTest(cmd=cmd):
+                self.assertTrue(pre_tool_use.bash_writes_file(cmd),
+                                "false negative: %r" % cmd)
+
+
 class TestStop(HookTestBase):
     def test_no_phase_allows_stop(self):
         self.assertIsNone(stop.decide({}, self.root))

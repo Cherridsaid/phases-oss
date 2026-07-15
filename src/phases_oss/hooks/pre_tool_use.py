@@ -27,13 +27,26 @@ from .common import (
 
 # Devices that are sinks, not real files: a redirect to one writes nothing.
 _STD_SINKS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
-# Commands that write a file by themselves (bare command name at a segment head,
-# or anywhere in a non-exempt segment). ``sed`` is handled separately: it only
-# writes with ``-i``/``--in-place``.
+# Commands that write (or delete) a file by themselves. Matched ONLY against
+# the resolved COMMAND at the head of a segment -- never against arguments --
+# so `pip install requests`, `man cp` or `grep -r install .` are not writes.
+# Lowercase canon: the lookup lowercases (PowerShell cmdlets are
+# case-insensitive by nature; over-matching `CP` on Linux is the safe
+# direction for a checkpoint).
 _WRITE_TOOLS = {
     "tee", "cp", "mv", "dd", "install", "truncate", "ln", "patch",
-    "Set-Content", "Add-Content", "Out-File",
+    "rm", "rmdir", "unlink", "touch", "mkdir", "shred",
+    "set-content", "add-content", "out-file",
+    "new-item", "remove-item", "copy-item", "move-item",
 }
+# Wrappers that merely launch the real command: the head is behind them
+# (`sudo cp`, `xargs sed -i`, `env FOO=1 tee f`).
+_WRAPPERS = {
+    "sudo", "doas", "env", "nohup", "time", "nice", "ionice", "stdbuf",
+    "timeout", "command", "builtin", "xargs",
+}
+# `VAR=value cmd` prefix assignments before the real command.
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # A segment whose command name is one of these is exempt from the write-TOOL
 # check: ``git`` (its own writes go to .git; ``git mv`` is a subcommand, not the
 # ``mv`` tool), ``cd``, and ``echo``. Redirects are still checked for them.
@@ -103,20 +116,36 @@ def bash_writes_file(command: str) -> bool:
         if tok in (">&", "&>", "&>>") and nxt and not nxt.isdigit() and nxt not in _STD_SINKS:
             return True
 
-    # A write-tool command in any non-exempt segment.
+    # The command a segment actually runs: skip `(` group openers, `VAR=value`
+    # prefixes and wrapper launchers, then take the basename, lowercased.
+    def _resolve_head(seg: list):
+        for index, token in enumerate(seg):
+            if token == "(" or _ENV_ASSIGN.match(token):
+                continue
+            head = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if head in _WRAPPERS:
+                continue
+            return head, index + 1
+        return "", len(seg)
+
+    # A write tool is only a write when it IS the segment's command: the same
+    # word as an argument (`pip install requests`, `man cp`) writes nothing.
     def _segment_writes(seg: list) -> bool:
         if not seg:
             return False
-        # `sed` writes in place with -i / -i<suffix> / --in-place[=suffix], even
-        # behind a wrapper (`sudo sed -i`, `xargs sed -i`), so check anywhere.
-        if "sed" in seg and any(
-            a == "-i" or a.startswith("-i") or a.startswith("--in-place")
-            for a in seg
-        ):
-            return True
-        if seg[0] in _WRITE_EXEMPT:
+        head, rest = _resolve_head(seg)
+        if not head or head in _WRITE_EXEMPT:
             return False
-        return any(word in _WRITE_TOOLS for word in seg)
+        if head in _WRITE_TOOLS:
+            return True
+        # `sed` writes in place with -i / -i<suffix> / --in-place[=suffix];
+        # the wrapper skip above already surfaces `sudo sed -i` / `xargs sed -i`.
+        if head in ("sed", "gsed"):
+            return any(
+                a == "-i" or a.startswith("-i") or a.startswith("--in-place")
+                for a in seg[rest:]
+            )
+        return False
 
     segment: list = []
     for tok in tokens:

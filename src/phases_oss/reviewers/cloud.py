@@ -26,6 +26,7 @@ work"; the reviewer is an independent quality check on top.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -69,12 +70,18 @@ def default_build_prompt(phase: Phase, root: Optional[Path] = None) -> str:
     return "\n".join(parts)
 
 
+# PASS must be a whole word at the start of a VERDICT line; trailing notes on
+# the same line are fine, but a longer token (PASSABLE) never matches.
+_PASS_LINE = re.compile(r"(?im)^\s*VERDICT\s*:\s*PASS\b")
+
+
 def parse_response(raw: str) -> ReviewVerdict:
     """Map an external reviewer's free-text reply to a verdict (fail closed).
 
     An explicit REFUS/EXPLOITED anywhere produces a REFUS (erring toward
-    refusal is safe). A pass requires the explicit marker ``VERDICT: PASS`` --
-    a stray "pass" inside prose ("I cannot pass judgment") must not approve.
+    refusal is safe). A pass requires a whole line reading exactly
+    ``VERDICT: PASS`` -- a stray "pass" inside prose ("I cannot pass
+    judgment") or a longer token (``VERDICT: PASSABLE``) must not approve.
     Anything else -- an empty or garbled reply -- is ``REVIEW_UNAVAILABLE``:
     the review did not verifiably happen, so it can neither approve nor be
     silently skipped.
@@ -84,7 +91,7 @@ def parse_response(raw: str) -> ReviewVerdict:
     upper = raw.upper()
     if "REFUS" in upper or "EXPLOITED" in upper:
         return ReviewVerdict(ReviewVerdict.REFUS, raw.strip(), action="see cloud reviewer notes")
-    if "VERDICT: PASS" in upper:
+    if _PASS_LINE.search(raw):
         return ReviewVerdict(ReviewVerdict.PASS_WITH_NOTES, raw.strip())
     return ReviewVerdict(
         ReviewVerdict.UNAVAILABLE,

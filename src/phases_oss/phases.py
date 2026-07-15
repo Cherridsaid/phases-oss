@@ -113,10 +113,12 @@ class PhaseError(Exception):
 class ReviewVerdict:
     """Result of a reviewer pass over a phase.
 
-    ``UNAVAILABLE`` is the fail-closed verdict: the reviewer backend was
-    absent, unreachable, timed out, or replied with something unparseable.
-    It is **never** treated as a pass -- a review that did not happen cannot
-    approve anything. There is no fourth outcome.
+    Four verdicts exist: ``PASS``, ``PASS_WITH_NOTES`` (pass, with findings
+    worth reading), ``REFUS`` and ``UNAVAILABLE``. ``UNAVAILABLE`` is the
+    fail-closed verdict: the reviewer backend was absent, unreachable, timed
+    out, or replied with something unparseable. It is **never** treated as a
+    pass -- a review that did not happen cannot approve anything. REFUS and
+    UNAVAILABLE both block close.
     """
 
     PASS = "PASS"
@@ -179,16 +181,39 @@ def load_state(root: Path) -> Optional[Phase]:
     path = state_paths(root)["state"]
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # A corrupted state must surface as an actionable PhaseError on every
+        # command, not as a raw traceback. reset is the escape hatch (it
+        # journals a terminal snapshot when it still can).
+        raise PhaseError(
+            "phase state file is corrupted (%s): %s -- fix it by hand or "
+            "abandon the phase with reset" % (exc.__class__.__name__, path)
+        )
+    if not isinstance(data, dict):
+        raise PhaseError(
+            "phase state file does not hold an object: %s -- fix it by hand "
+            "or abandon the phase with reset" % path
+        )
     return Phase(data)
 
 
 def save_state(root: Path, phase: Phase) -> None:
+    """Persist the state atomically: full temp write, fsync, then rename.
+
+    A crash mid-write must never leave a half-truncated state file behind --
+    os.replace is atomic on POSIX and on Windows (same volume).
+    """
     paths = state_paths(root)
     paths["dir"].mkdir(parents=True, exist_ok=True)
-    paths["state"].write_text(
-        json.dumps(phase.data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    target = paths["state"]
+    tmp = target.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(phase.data, indent=2, ensure_ascii=False))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, target)
 
 
 def _emit(root: Path, event_type: str, phase: Phase, **kwargs) -> None:
@@ -224,6 +249,12 @@ def default_runner(
     remains the authority. Output is never silenced. ``env`` defaults to None,
     which inherits the parent environment; callers that need isolation (e.g. the
     verifier re-running a proof against a committed tree) pass an explicit map.
+
+    Output is decoded as UTF-8 with ``errors="replace"``, never via the locale:
+    on Windows the locale codec (cp1252) raises UnicodeDecodeError on common
+    UTF-8 test-runner output (e.g. the bytes of ❌), which would crash ``prove``
+    and lose the proof result. A replacement character in the log is acceptable;
+    an unrecorded proof is not. The exit code is unaffected either way.
     """
     proc = subprocess.run(
         command,
@@ -231,7 +262,8 @@ def default_runner(
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
     return proc.returncode, proc.stdout or ""
@@ -281,7 +313,8 @@ def default_verifier(root: Path, commit_sha: str, proof_command: str) -> bool:
             ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), commit_sha],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if add.returncode != 0:
             return False
@@ -307,7 +340,8 @@ def _git_out(args: Sequence[str]) -> Optional[str]:
             ["git", *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except (OSError, ValueError):
         return None
@@ -487,6 +521,18 @@ def init_phase(
     analysis_ref: str = "",
     analysis_store_schema: int = 2,
 ) -> Phase:
+    # One open phase at a time: a silent overwrite would leave the previous
+    # phase dangling in the journal (no terminal event) and let a blocked
+    # level-2 phase be "escaped" by re-initing at level 0. Abandoning a phase
+    # is an explicit transition: reset.
+    existing = load_state(root)
+    if existing is not None and existing.data.get("active"):
+        raise PhaseError(
+            "a phase is already open (status %r, objective %r): close it, or "
+            "abandon it explicitly with reset before init"
+            % (existing.data.get("status"), existing.data.get("objective"))
+        )
+
     if not objective or not objective.strip():
         raise PhaseError("objective is required")
     if not proof_command or not proof_command.strip():
@@ -619,11 +665,61 @@ def prove(root: Path, *, runner: Optional[Runner] = None) -> int:
         phase.data["attempts"] = 0
     else:
         phase.data["attempts"] = int(phase.data.get("attempts", 0)) + 1
+    # A new proof outdates every validation recorded against the previous
+    # state of the tree: an audit, review verdict, runtime proof or human
+    # validation taken before this run examined code that no longer exists.
+    # Level 0 has no review requirement, so its audit gate stays satisfied.
+    if reviews_required(_phase_level(phase.data)) > 0:
+        phase.data["audit_passed"] = False
+        phase.data["audit_agent_count"] = 0
+        phase.data["audit_reports"] = []
+        phase.data["audited_at"] = None
+    phase.data["review_verdict"] = None
+    phase.data["runtime_passed"] = False
+    phase.data["runtime_report"] = ""
+    phase.data["human_validation_passed"] = False
+    phase.data["human_validated_at"] = None
+    phase.data["human_validator"] = None
+    phase.data["verify_passed"] = False
     _emit(root, "proof_completed", phase)
     return code
 
 
-def _validate_reports(reports: Sequence[str], need: int) -> List[str]:
+# The only verdicts a report may declare. Severity order matters: when a
+# report carries several VERDICT lines, the strictest one wins.
+_REPORT_VERDICTS = ("EXPLOITED", "REFUS", "PASS_WITH_NOTES", "PASS")
+# The verdict token must be a whole word right after "VERDICT:"; free-text
+# commentary may follow on the same line. \b keeps PASSABLE from reading as
+# PASS -- the token captured there is "PASSABLE", which is not in the list.
+_VERDICT_LINE = re.compile(r"(?im)^\s*VERDICT\s*:\s*([A-Za-z_]+)\b")
+
+
+def _parse_report_verdict(text: str, source: str) -> str:
+    """Return the strictest declared verdict, refusing anything unrecognized.
+
+    A bare occurrence of the word VERDICT, or an invented value
+    (``VERDICT: BANANA``, ``VERDICT: PASSABLE``), is not a verdict: the
+    report is rejected rather than counted toward the audit.
+    """
+    found = [m.group(1).upper() for m in _VERDICT_LINE.finditer(text)]
+    if not found:
+        raise PhaseError(
+            "report has no structured verdict line "
+            "('VERDICT: PASS|PASS_WITH_NOTES|REFUS|EXPLOITED'): %s" % source
+        )
+    unknown = [v for v in found if v not in _REPORT_VERDICTS]
+    if unknown:
+        raise PhaseError(
+            "report declares unrecognized verdict %r (allowed: %s): %s"
+            % (unknown[0], ", ".join(_REPORT_VERDICTS), source)
+        )
+    for strictest in _REPORT_VERDICTS:
+        if strictest in found:
+            return strictest
+    raise PhaseError("unreachable verdict state: %s" % source)  # pragma: no cover
+
+
+def _validate_reports(reports: Sequence[str], need: int) -> Tuple[List[str], List[str]]:
     reports = [r.strip() for r in reports if r and r.strip()]
     if len(reports) < need:
         raise PhaseError(
@@ -632,6 +728,7 @@ def _validate_reports(reports: Sequence[str], need: int) -> List[str]:
         )
     seen_hashes = set()
     resolved: List[str] = []
+    verdicts: List[str] = []
     for r in reports:
         p = Path(r)
         if not p.exists():
@@ -639,14 +736,13 @@ def _validate_reports(reports: Sequence[str], need: int) -> List[str]:
         data = p.read_bytes()
         if len(data) < _MIN_REPORT_BYTES:
             raise PhaseError("report too short (<%d bytes): %s" % (_MIN_REPORT_BYTES, r))
-        if "VERDICT" not in data.decode("utf-8", "replace"):
-            raise PhaseError("report has no structured 'VERDICT': %s" % r)
+        verdicts.append(_parse_report_verdict(data.decode("utf-8", "replace"), r))
         digest = hashlib.sha256(data).hexdigest()
         if digest in seen_hashes:
             raise PhaseError("two identical reports (hash): audit not distinct")
         seen_hashes.add(digest)
         resolved.append(str(p.resolve()))
-    return resolved
+    return resolved, verdicts
 
 
 def record_audit(
@@ -655,7 +751,11 @@ def record_audit(
     reports: Optional[Sequence[str]] = None,
     open_exploited: int = 0,
 ) -> Phase:
-    phase = _require_active(root)
+    # status="active" is load-bearing: without it, the reopen branch below
+    # would flip a pending_approval phase straight to "active", silently
+    # skipping the approve gate (audited bypass: init -> record_audit(EXPLOITED)
+    # -> prove -> record_audit -> close, with approved_at=None).
+    phase = _require_active(root, status="active")
     # Normalized policy: no review at level 0, one independent review at 1-3.
     need = reviews_required(_phase_level(phase.data))
     if need == 0:
@@ -663,9 +763,22 @@ def record_audit(
         phase.data["audit_agent_count"] = 0
         phase.data["open_exploited"] = 0
     else:
-        resolved = _validate_reports(reports or [], need)
+        resolved, verdicts = _validate_reports(reports or [], need)
         phase.data["audit_agent_count"] = len(resolved)
         phase.data["audit_reports"] = resolved
+        # The caller's open_exploited claim must not contradict the reports.
+        if "EXPLOITED" in verdicts and open_exploited <= 0:
+            raise PhaseError(
+                "a report declares VERDICT: EXPLOITED but open_exploited=0: "
+                "re-audit with the real count"
+            )
+        if "REFUS" in verdicts:
+            phase.data["audit_passed"] = False
+            phase.data["audited_at"] = _now()
+            _emit(root, "audit_recorded", phase)
+            raise PhaseError(
+                "a report declares VERDICT: REFUS: fix, then re-audit"
+            )
         if open_exploited > 0:
             phase.data["open_exploited"] = open_exploited
             phase.data["audit_passed"] = False
@@ -695,6 +808,8 @@ def review(root: Path, reviewer: Reviewer) -> ReviewVerdict:
     from phases_oss import events as _events
 
     phase = _require_active(root, status="active")
+    if not phase.data.get("proof_passed"):
+        raise PhaseError("review refused: prove first (no passing proof on record)")
     verdict = reviewer(phase)
     review_id = _events.new_id("rev")
     phase.data["review_verdict"] = {
@@ -713,16 +828,32 @@ def review(root: Path, reviewer: Reviewer) -> ReviewVerdict:
     return verdict
 
 
+def _require_proven_and_audited(phase: Phase, step: str) -> None:
+    """Later steps ride on a passing proof and a completed audit: a runtime
+    trace or a human signature taken before them validates nothing."""
+    if not phase.data.get("proof_passed"):
+        raise PhaseError("%s refused: prove first (no passing proof on record)" % step)
+    need = reviews_required(_phase_level(phase.data))
+    if not phase.data.get("audit_passed") or int(phase.data.get("audit_agent_count", 0)) < need:
+        raise PhaseError(
+            "%s refused: audit first (%d report(s) required)" % (step, need)
+        )
+
+
 def runtime(root: Path, report: str) -> Phase:
-    phase = _require_active(root)
+    phase = _require_active(root, status="active")
+    _require_proven_and_audited(phase, "runtime")
     p = Path(report)
     if not p.exists():
         raise PhaseError("runtime proof not found: %s" % report)
     data = p.read_bytes()
     if len(data) < _MIN_REPORT_BYTES:
         raise PhaseError("runtime proof too short (<%d bytes)" % _MIN_REPORT_BYTES)
-    if "VERDICT" not in data.decode("utf-8", "replace"):
-        raise PhaseError("runtime proof has no structured 'VERDICT'")
+    verdict = _parse_report_verdict(data.decode("utf-8", "replace"), report)
+    if verdict not in ("PASS", "PASS_WITH_NOTES"):
+        raise PhaseError(
+            "runtime proof declares VERDICT: %s -- runtime is not proven" % verdict
+        )
     phase.data["runtime_passed"] = True
     phase.data["runtime_report"] = str(p.resolve())
     _emit(root, "runtime_recorded", phase)
@@ -730,10 +861,18 @@ def runtime(root: Path, report: str) -> Phase:
 
 
 def human_approve(root: Path, *, validator: str) -> Phase:
-    """Record the explicit human validation required at level 3."""
-    phase = _require_active(root)
+    """Record the explicit human validation required at level 3.
+
+    The signature is the LAST gate of the level-3 path: it certifies work
+    that has already been proven, audited and runtime-checked -- signing
+    earlier would certify nothing.
+    """
+    phase = _require_active(root, status="active")
     if _phase_level(phase.data) != 3:
         raise PhaseError("human validation is reserved for level 3 phases")
+    _require_proven_and_audited(phase, "human validation")
+    if not (phase.data.get("runtime_passed") and phase.data.get("runtime_report")):
+        raise PhaseError("human validation refused: record the runtime proof first")
     if not validator or not validator.strip():
         raise PhaseError("validator is required")
     phase.data["human_validation_passed"] = True
@@ -758,6 +897,16 @@ def close(
         raise PhaseError("required audit missing")
     if int(phase.data.get("open_exploited", 0)) > 0:
         raise PhaseError("unresolved EXPLOITED findings: close refused")
+    # A recorded review verdict gates the close: REFUS means fix first, and
+    # REVIEW_UNAVAILABLE means the review did not verifiably happen -- neither
+    # may be waved through. No verdict recorded = the optional reviewer was
+    # not used; the mandatory audit gate above still applies.
+    recorded_review = phase.data.get("review_verdict") or {}
+    if recorded_review.get("verdict") in (ReviewVerdict.REFUS, ReviewVerdict.UNAVAILABLE):
+        raise PhaseError(
+            "review verdict %s: close refused (fix and re-review, or re-run "
+            "the review)" % recorded_review["verdict"]
+        )
 
     level = _phase_level(phase.data)
     need = reviews_required(level)
@@ -777,6 +926,24 @@ def close(
         (phase.data.get("analysis") or {}).get("used")
     ):
         raise PhaseError("ANALYSIS_REQUIRED: close refused (pre-phase analysis metadata missing)")
+
+    # Belt and braces over the prove-time invalidation above: a validation
+    # that somehow predates the last proof (hand-edited or legacy state)
+    # reviewed a tree the proof no longer describes.
+    proved_at = phase.data.get("proved_at")
+    if proved_at:
+        stale = []
+        if phase.data.get("audited_at") and phase.data["audited_at"] < proved_at:
+            stale.append("audit")
+        if (phase.data.get("human_validated_at")
+                and phase.data["human_validated_at"] < proved_at):
+            stale.append("human validation")
+        if stale:
+            raise PhaseError(
+                "stale validation(s) at close: %s recorded before the last "
+                "prove -- re-run them against the current proof"
+                % ", ".join(stale)
+            )
 
     if not lesson or not lesson.strip():
         raise PhaseError("lesson is required at close (learning loop)")

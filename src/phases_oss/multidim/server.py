@@ -535,7 +535,14 @@ def serve(stdin=None, stdout=None, log_stream=None) -> int:
     text leaks to the real stderr.
     """
     if stdin is None:
-        stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", newline="\n")
+        # errors="replace" is load-bearing: with strict decoding, one invalid
+        # byte on stdin raises UnicodeDecodeError inside ``for line in stdin``
+        # and kills the whole server before the -32700 parse-error path can
+        # answer -- even for valid requests already buffered. A replaced
+        # character just turns that one line into invalid JSON, which the
+        # loop below already answers with -32700 and keeps serving.
+        stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8",
+                                 errors="replace", newline="\n")
     if stdout is None:
         stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
     store = store_mod.load()

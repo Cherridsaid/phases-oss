@@ -150,10 +150,14 @@ The audit step can call a **reviewer**:
 
 The cloud reviewer **fails closed on unavailability**: an absent backend, an
 unreachable sender, an empty reply or an unparseable reply all yield
-`REVIEW_UNAVAILABLE` — never a PASS and never a silent skip. There are exactly
-three review outcomes: `PASS` (continue), `REFUS` (fix and re-review),
-`REVIEW_UNAVAILABLE` (the review did not happen; deterministic tests remain
-the authority, but the review box is not ticked).
+`REVIEW_UNAVAILABLE` — never a PASS and never a silent skip. There are four
+review verdicts: `PASS` (continue), `PASS_WITH_NOTES` (continue, findings
+worth reading), `REFUS` (fix and re-review), `REVIEW_UNAVAILABLE` (the review
+did not happen). Once a verdict is recorded on the phase, `close` is gated on
+it: `REFUS` and `REVIEW_UNAVAILABLE` both refuse the close until a re-review
+passes. Verdicts are a closed vocabulary parsed strictly — `VERDICT: PASSABLE`
+or a stray occurrence of the word `VERDICT` approves nothing, and a new
+`prove` invalidates every validation recorded against the previous tree.
 
 ```python
 from phases_oss.reviewers import get_reviewer
