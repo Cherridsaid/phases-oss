@@ -52,9 +52,26 @@ def migrate_additive(store: Dict) -> bool:
     data, without a reset, without a version bump. Returns True when the store
     was completed (it must then be saved)."""
     changed = False
+    # scrub markers PERSISTED by a pre-fix save(): deleting them here flags
+    # the store for a locked re-save, which writes the clean copy. The
+    # in-memory markers of a fresh reset are unaffected (set AFTER this runs).
+    for k in PRIVATE_MARKERS:
+        if k in store:
+            del store[k]
+            changed = True
     for c in store.get("contexts", []):
         if not isinstance(c, dict):
             continue
+        # keywords/axes are RECOVERABLE gaps (a hand-edited store may omit
+        # them): default them to [] instead of resetting the whole store.
+        # Every consumer (detect_context, build_grid, learn) relies on the
+        # keys existing; a missing 'name' stays unrecoverable -> reset path.
+        if "keywords" not in c:
+            c["keywords"] = []
+            changed = True
+        if "axes" not in c:
+            c["axes"] = []
+            changed = True
         if "traps" not in c:
             c["traps"] = []
             changed = True
@@ -86,7 +103,12 @@ def _valid_context(c) -> bool:
     """
     if not isinstance(c, dict):
         return False
-    if not isinstance(c.get("name", ""), str):
+    # every consumer indexes context["name"] (detection, frame building,
+    # learn): a context without a non-empty name is unrecoverable -- there is
+    # no name to invent -- so it must fail validation (backup + reset), never
+    # crash multidim_analyze with a KeyError later
+    name = c.get("name")
+    if not isinstance(name, str) or not name.strip():
         return False
     if not isinstance(c.get("description", ""), str):
         return False
@@ -187,10 +209,19 @@ def _atomic_write(path: Path, data: Dict) -> None:
             os.remove(tmp)
 
 
+# In-memory diagnostics set by load() after a corrupt-store reset. They are
+# for the CALLER only and must never reach the disk copy: a later mutate()
+# would otherwise persist them forever (one even carries a machine-local
+# path). An explicit tuple -- not a blanket '_' prefix filter -- so an
+# unknown caller extension key is never silently dropped by save().
+PRIVATE_MARKERS = ("_reset_reason", "_backup")
+
+
 def save(store: Dict, path: Optional[Path] = None) -> None:
     target = path or paths.store_path()
     paths.assert_not_personal(target)  # even an explicit path can't touch ~/.multidim
-    _atomic_write(target, store)
+    data = {k: v for k, v in store.items() if k not in PRIVATE_MARKERS}
+    _atomic_write(target, data)
 
 
 def _needs_no_migration(store: Dict) -> bool:
@@ -198,8 +229,22 @@ def _needs_no_migration(store: Dict) -> bool:
     can be returned read-only without any write (the lock-free fast path)."""
     if "generic_blacklist" not in store:
         return False
-    return all(isinstance(c, dict) and "traps" in c
-               for c in store.get("contexts", []))
+    # markers PERSISTED by a pre-fix version of save() must not survive on the
+    # lock-free fast path: falling through to the locked path scrubs them (the
+    # single save there filters PRIVATE_MARKERS) instead of serving them forever
+    if any(k in store for k in PRIVATE_MARKERS):
+        return False
+    for c in store.get("contexts", []):
+        if not (isinstance(c, dict) and "traps" in c
+                and "keywords" in c and "axes" in c):
+            return False
+        # a trap missing 'active' still needs the migration (it defaults the
+        # field to True): returning it on the fast path would leave the trap
+        # permanently invisible to select_traps, which requires active is True
+        for t in c.get("traps", []):
+            if isinstance(t, dict) and "active" not in t:
+                return False
+    return True
 
 
 def _read_valid_no_migrate(path: Path) -> Optional[Dict]:
