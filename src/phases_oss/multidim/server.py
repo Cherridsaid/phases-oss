@@ -55,7 +55,7 @@ def detect_context(store: Dict, subject: str) -> Tuple[Dict, int]:
     best: Optional[Dict] = None
     best_score = 0
     for c in store.get("contexts", []):
-        if c.get("name") == "generic":
+        if is_generic(c.get("name")):
             continue
         score = 0
         for k in c.get("keywords", []):
@@ -74,6 +74,17 @@ def detect_context(store: Dict, subject: str) -> Tuple[Dict, int]:
     if generic is None:
         raise RuntimeError("the 'generic' context must exist")
     return generic, 0
+
+
+def is_generic(name) -> bool:
+    """Single predicate for the 'generic' fallback family.
+
+    Detection (skip), the learn keyword guard and any future caller must agree
+    on what counts as 'generic': any case or surrounding-space variant. Three
+    call sites with three different comparisons (exact, lower, lower+strip)
+    would let a hand-edited 'Generic' context be keyword-matched by detection
+    while learn treats it as the fallback."""
+    return isinstance(name, str) and name.strip().lower() == "generic"
 
 
 class _NothingLearned(Exception):
@@ -372,7 +383,7 @@ def call_tool(store: Dict, name: str, args: Dict) -> Tuple[str, bool]:
         # description are all legitimate on generic) succeeds but says what
         # was dropped instead of reporting a false full success.
         generic_keywords_ignored = False
-        if cname.lower() == "generic" and new_keywords:
+        if is_generic(cname) and new_keywords:
             # only a VALID trap makes the call "mixed" (round 9): an invalid
             # one (e.g. {}) is refused later by upsert_traps, so counting it
             # here would report success on a call that learns nothing at all
@@ -406,7 +417,7 @@ def call_tool(store: Dict, name: str, args: Dict) -> Tuple[str, bool]:
                 for k in new_keywords:
                     if k not in existing["keywords"]:
                         existing["keywords"].append(k)
-                merge_axes(existing["axes"], new_axes)
+                a_add, a_upd = merge_axes(existing["axes"], new_axes)
                 t_add, t_upd, t_err = frames_mod.upsert_traps(existing, raw_traps)
                 # round 10: the keywords-only decision can only fall AFTER
                 # upsert_traps, under the lock -- a trap valid in shape can
@@ -426,6 +437,10 @@ def call_tool(store: Dict, name: str, args: Dict) -> Tuple[str, bool]:
                         .format(" ; ".join(t_err)))
                 msg = "context '{}' enriched. {} axes total.".format(
                     existing["name"], len(existing["axes"]))
+                if new_axes:
+                    # same contract as traps: the caller can tell an addition
+                    # from an in-place update without diffing the store
+                    msg += " Axes: {} added, {} updated.".format(a_add, a_upd)
                 if raw_traps:
                     msg += " Traps: {} added, {} updated, {} total.".format(
                         t_add, t_upd, len(existing["traps"]))
@@ -464,8 +479,14 @@ def call_tool(store: Dict, name: str, args: Dict) -> Tuple[str, bool]:
             return ("failed to persist the learned context (store unchanged): {}"
                     .format(exc), True)
         # committed to disk -> refresh the live store in place so the serve
-        # loop's reference sees the merged result
+        # loop's reference sees the merged result. The in-memory reset markers
+        # are the CALLER's diagnostics (contract: "for the caller only"): they
+        # must survive the refresh -- the DISK copy alone stays filtered.
+        # old diagnostics first, fresh state second: if the reload itself just
+        # produced NEWER markers (a reset during this call), they must win
+        markers = {k: store[k] for k in store_mod.PRIVATE_MARKERS if k in store}
         store.clear()
+        store.update(markers)
         store.update(fresh)
         if generic_keywords_ignored:
             msg += (" Keywords ignored: 'generic' is never keyword-matched "
@@ -646,8 +667,15 @@ def handle_message(store: Dict, msg: Dict) -> Optional[Dict]:
                     "result": {"content": [{"type": "text",
                                             "text": "internal error: cannot load store: %s" % exc}],
                                "isError": True}}
-        # keep the caller's reference in sync with disk too (in-place refresh)
+        # keep the caller's reference in sync with disk too (in-place refresh).
+        # Same marker contract as the learn path: the in-memory reset markers
+        # are the caller's diagnostics and survive every refresh -- only the
+        # disk copy is filtered.
+        # old diagnostics first, fresh state second: a reset that happened
+        # during THIS reload carries newer markers and must win over the old
+        markers = {k: store[k] for k in store_mod.PRIVATE_MARKERS if k in store}
         store.clear()
+        store.update(markers)
         store.update(live)
         # Defence in depth: any unexpected tool error becomes an isError result,
         # never an unhandled exception that would kill the serve loop.

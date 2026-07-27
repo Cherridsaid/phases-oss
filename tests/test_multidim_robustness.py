@@ -18,8 +18,12 @@ Each test reproduces, through the real entry points (``call_tool`` /
 
 import json
 import os
+import sys
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
 from phases_oss.multidim import server, store
 
@@ -236,7 +240,8 @@ class TestD3AxisDeduplication(RobustnessTestBase):
                                            "axes": [{"name": "A", "question": "q1"},
                                                     {"name": "A", "question": "q2"}]})
         self.assertFalse(is_error, text)
-        self.assertIn("created with 1 axes", text)
+        # exact up to the period: "created with 11 axes." must NOT match
+        self.assertIn("created with 1 axes.", text)
         ctx = store.find_context(store.load(), "c2")
         self.assertEqual(len(ctx["axes"]), 1)
 
@@ -397,6 +402,148 @@ class TestD5PrivateKeysNeverPersisted(RobustnessTestBase):
         on_disk = json.loads(path.read_text(encoding="utf-8"))
         self.assertNotIn("_reset_reason", on_disk)
         self.assertNotIn("_backup", on_disk)
+
+
+class TestD6ReplaceRetry(RobustnessTestBase):
+    def test_save_survives_transient_permission_error(self):
+        # D6 (lot 2): a transient Windows sharing violation (reader holding
+        # the file for milliseconds) must be absorbed by the bounded retry.
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] <= 3:
+                raise PermissionError(13, "sharing violation")
+            return real_replace(src, dst)
+
+        st = store.load()
+        with mock.patch.object(store, "REPLACE_BACKOFF_S", 0.001), \
+                mock.patch.object(store.os, "replace", side_effect=flaky):
+            store.save(st)
+        self.assertGreaterEqual(calls["n"], 4)
+        on_disk = json.loads(store.paths.store_path().read_text(encoding="utf-8"))
+        self.assertIn("contexts", on_disk)
+
+    def test_save_fails_closed_after_persistent_permission_error(self):
+        # a PERSISTENT hold still fails with the original error after the
+        # last attempt, and the temp file never lingers next to the store
+        st = store.load()
+        with mock.patch.object(store, "REPLACE_BACKOFF_S", 0.001), \
+                mock.patch.object(store.os, "replace",
+                                  side_effect=PermissionError(13, "denied")):
+            with self.assertRaises(PermissionError):
+                store.save(st)
+        leftovers = [p.name for p in store.paths.store_path().parent.iterdir()
+                     if p.name.startswith("store-")]
+        self.assertEqual(leftovers, [])
+
+    @unittest.skipUnless(sys.platform.startswith("win"),
+                         "Windows file-sharing semantics")
+    def test_save_succeeds_while_reader_briefly_holds_the_file(self):
+        # real integration: a reader holds the store open ~0.15 s (far below
+        # the ~0.9 s retry budget); save() must win once the handle closes.
+        # This exact scenario failed with PermissionError before the fix.
+        st = store.load()
+        path = store.paths.store_path()
+        started = threading.Event()
+
+        def hold():
+            with open(path, "r", encoding="utf-8") as fh:
+                fh.read(5)
+                started.set()
+                time.sleep(0.15)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        self.assertTrue(started.wait(timeout=2.0))
+        try:
+            store.save(st)  # must retry through the reader's hold
+        finally:
+            t.join()
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("contexts", on_disk)
+
+
+class TestKimiFindings(RobustnessTestBase):
+    def test_markers_survive_learn_in_memory(self):
+        # Kimi finding 1 (2026-07-27): the reset markers are the caller's
+        # diagnostics; the post-learn in-place refresh must not discard them
+        # (the disk copy alone stays filtered).
+        path = store.paths.store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ not json", encoding="utf-8")
+        st = store.load()
+        self.assertIn("_reset_reason", st)
+        text, is_error = server.call_tool(st, "multidim_learn",
+                                          {"context": "c1", "keywords": ["k"]})
+        self.assertFalse(is_error, text)
+        self.assertIn("_reset_reason", st)
+        self.assertIn("_backup", st)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn("_reset_reason", on_disk)
+
+    def test_markers_survive_handle_message_reload(self):
+        # Review finding (2026-07-27, lot 2 round 1): the per-call reload in
+        # handle_message wiped the markers exactly like the learn path did --
+        # the same contract applies to every in-place refresh.
+        path = store.paths.store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ not json", encoding="utf-8")
+        st = store.load()
+        self.assertIn("_reset_reason", st)
+        resp = server.handle_message(st, {"jsonrpc": "2.0", "id": 1,
+                                          "method": "tools/call",
+                                          "params": {"name": "multidim_contexts",
+                                                     "arguments": {}}})
+        self.assertNotIn("error", resp)
+        self.assertIn("_reset_reason", st)
+        self.assertIn("_backup", st)
+
+    def test_fresh_markers_from_reload_win_over_old_ones(self):
+        # Review finding (2026-07-27, lot 2 round 2): if the per-call reload
+        # itself resets a corrupt store, ITS markers are newer than the ones
+        # carried in memory -- the old ones must not overwrite them.
+        st = store.load()
+        st["_reset_reason"] = "OLD_MARKER"
+        path = store.paths.store_path()
+        path.write_text("{ corrupt again", encoding="utf-8")
+        resp = server.handle_message(st, {"jsonrpc": "2.0", "id": 1,
+                                          "method": "tools/call",
+                                          "params": {"name": "multidim_contexts",
+                                                     "arguments": {}}})
+        self.assertNotIn("error", resp)
+        self.assertIn("_reset_reason", st)
+        self.assertNotEqual(st["_reset_reason"], "OLD_MARKER")
+
+    def test_learn_message_reports_axis_counters(self):
+        # Kimi finding 2: like traps, the message distinguishes an addition
+        # from an in-place update.
+        text, _ = server.call_tool(store.load(), "multidim_learn",
+                                   {"context": "c", "axes": [{"name": "A", "question": "q1"}]})
+        self.assertIn("created with 1 axes.", text)
+        text, _ = server.call_tool(store.load(), "multidim_learn",
+                                   {"context": "c", "axes": [{"name": "A", "question": "q2"},
+                                                             {"name": "B", "question": "qb"}]})
+        self.assertIn("Axes: 1 added, 1 updated.", text)
+
+    def test_case_variant_generic_is_never_keyword_matched(self):
+        # Kimi finding 3: a hand-edited 'Generic' must be treated as the
+        # fallback family by DETECTION too, not keyword-matched while learn
+        # treats it as generic (one predicate, one semantics).
+        self._write_store(lambda st: st["contexts"].append(
+            {"name": "Generic", "description": "d", "keywords": ["zorglubxyz"],
+             "axes": [], "traps": []}))
+        c, score = server.detect_context(store.load(), "sujet zorglubxyz")
+        self.assertEqual(c.get("name"), "generic")
+        self.assertEqual(score, 0)
+
+    def test_case_variant_generic_learn_guard_applies(self):
+        text, is_error = server.call_tool(store.load(), "multidim_learn",
+                                          {"context": "GENERIC",
+                                           "keywords": ["mortx"]})
+        self.assertTrue(is_error)
+        self.assertIn("generic", text.lower())
 
 
 if __name__ == "__main__":

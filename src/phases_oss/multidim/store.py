@@ -196,6 +196,31 @@ def validate_context_name(name) -> Optional[str]:
     return None
 
 
+# Bounded retry for the final rename of an atomic write. On Windows,
+# os.replace fails with PermissionError (sharing violation) while ANY other
+# process holds the target open without FILE_SHARE_DELETE -- including our own
+# lock-free fast-path read, an antivirus scan or a backup tool. Those holds
+# are transient (milliseconds), so a short linear backoff absorbs them without
+# changing the locking semantics; no application lock could cover external
+# readers anyway. POSIX rename never fails for open readers, so the retry is
+# never exercised there.
+REPLACE_ATTEMPTS = 10
+REPLACE_BACKOFF_S = 0.02   # linear: 0.02, 0.04, ... (~0.9 s worst case)
+
+
+def _replace_with_retry(src: str, dst: str) -> None:
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            # a PERSISTENT hold (file kept open, real ACL denial) still fails
+            # closed with the original error after the last attempt
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPLACE_BACKOFF_S * (attempt + 1))
+
+
 def _atomic_write(path: Path, data: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, ensure_ascii=False, indent=2)
@@ -203,7 +228,7 @@ def _atomic_write(path: Path, data: Dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        os.replace(tmp, str(path))
+        _replace_with_retry(tmp, str(path))
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
