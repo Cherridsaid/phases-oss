@@ -18,6 +18,11 @@ from typing import Dict, List
 # Bumped when the seed contexts change. Distinct from any personal store schema.
 BASE_VERSION = 1
 
+# Bumped when a keyword is ADDED to a seed context. An existing store keeps its
+# own version and is enriched once by the additive migration -- never reset, so
+# bumping this is safe where bumping BASE_VERSION would discard learned traps.
+SEED_KEYWORDS_VERSION = 1
+
 
 def _ax(name: str, question: str, sublenses: List[str]) -> Dict:
     return {"name": name, "question": question, "sublenses": list(sublenses)}
@@ -56,8 +61,12 @@ def base_contexts() -> List[Dict]:
         _ctx(
             "code_review",
             "Reviewing a code change: correctness, risk, tests, maintainability.",
-            ["code", "review", "diff", "pull request", "refactor", "bug", "regression",
-             "test", "coverage", "lint", "api", "breaking change", "maintainability"],
+            # same whole-token rule as 'decision': list the inflections that a
+            # real review subject actually uses ('tests', 'refactoring', ...)
+            ["code", "review", "reviews", "diff", "diffs", "pull request",
+             "refactor", "refactoring", "bug", "bugs",
+             "regression", "regressions", "test", "tests",
+             "coverage", "lint", "api", "breaking change", "maintainability"],
             [
                 _ax("Correctness", "Does the change do what it claims, on the happy path and edges?",
                     ["Stated behaviour vs actual", "Edge cases and inputs", "Off-by-one and boundaries"]),
@@ -104,8 +113,16 @@ def base_contexts() -> List[Dict]:
         _ctx(
             "decision",
             "Making a decision: options, trade-offs, reversibility, risk.",
-            ["decision", "choice", "option", "trade-off", "tradeoff", "compare",
-             "should i", "risk", "reversible", "criteria"],
+            # keywords match whole tokens, so every realistic inflection has to
+            # be listed: 'option' alone never matches 'options', and a decision
+            # subject that misses here silently falls back to the generic grid.
+            ["decision", "decisions", "decide", "deciding",
+             "choice", "choices", "option", "options",
+             "alternative", "alternatives",
+             "trade-off", "tradeoff", "trade-offs", "tradeoffs",
+             "compare", "comparing", "comparison",
+             "should i", "should we", "whether",
+             "risk", "risks", "reversible", "criteria", "criterion"],
             [
                 _ax("Real question", "What decision is actually being made, and by when?",
                     ["The actual choice", "Constraints and deadline", "Who decides"]),

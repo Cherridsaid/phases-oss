@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from . import paths
-from .base_contexts import BASE_VERSION, base_contexts
+from .base_contexts import BASE_VERSION, SEED_KEYWORDS_VERSION, base_contexts
 
 # Cross-process lock parameters for the read-modify-write of the store.
 LOCK_TIMEOUT_S = 10.0    # give up acquiring after this long -> TimeoutError
@@ -85,7 +85,40 @@ def migrate_additive(store: Dict) -> bool:
     if "generic_blacklist" not in store:
         store["generic_blacklist"] = list(DEFAULT_GENERIC_BLACKLIST)
         changed = True
+    if _merge_seed_keywords(store):
+        changed = True
     return changed
+
+
+def _merge_seed_keywords(store: Dict) -> bool:
+    """Union keywords ADDED to a seed context into a store built by an older
+    release. Additive only: nothing is renamed, reordered or removed, and a
+    context the user created is never touched.
+
+    Guarded by a stored marker rather than run on every load, so a seed keyword
+    the user deliberately deletes afterwards does not silently come back (and
+    the store is not rewritten on every start).
+    """
+    try:
+        seen_version = int(store.get("seed_keywords_version", 0) or 0)
+    except (ValueError, TypeError, OverflowError):
+        seen_version = 0  # hand-edited garbage: redo the union, it is idempotent
+    if seen_version >= SEED_KEYWORDS_VERSION:
+        return False
+    for seed in base_contexts():
+        target = find_context(store, str(seed.get("name", "")))
+        if target is None:
+            continue  # a seed context the user deleted stays deleted
+        keywords = target.get("keywords")
+        if not isinstance(keywords, list):
+            continue  # malformed: migrate_additive already defaulted it, skip
+        present = {str(k).strip().casefold() for k in keywords if isinstance(k, str)}
+        for k in seed.get("keywords", []):
+            if str(k).strip().casefold() not in present:
+                keywords.append(k)
+                present.add(str(k).strip().casefold())
+    store["seed_keywords_version"] = SEED_KEYWORDS_VERSION
+    return True
 
 
 def _fresh_store() -> Dict:
@@ -253,6 +286,14 @@ def _needs_no_migration(store: Dict) -> bool:
     """True when a validated store already has every additive v2 field, so it
     can be returned read-only without any write (the lock-free fast path)."""
     if "generic_blacklist" not in store:
+        return False
+    # a store built before the current seed keywords still needs the union:
+    # returning it on the fast path would leave it routing decision subjects
+    # to the generic grid forever
+    try:
+        if int(store.get("seed_keywords_version", 0) or 0) < SEED_KEYWORDS_VERSION:
+            return False
+    except (ValueError, TypeError, OverflowError):
         return False
     # markers PERSISTED by a pre-fix version of save() must not survive on the
     # lock-free fast path: falling through to the locked path scrubs them (the
