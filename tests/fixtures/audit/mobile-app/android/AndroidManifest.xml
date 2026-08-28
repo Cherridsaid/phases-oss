@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<manifest package="com.demo">
+  <uses-permission android:name="android.permission.INTERNET"/>
+</manifest>

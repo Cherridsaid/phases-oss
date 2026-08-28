@@ -218,6 +218,52 @@ atomic writes, a cross-process lock, and a neutral base library. A private
 denylist for the neutrality guard can be supplied out-of-band via
 `PHASES_OSS_EXTRA_FORBIDDEN` (comma-separated), never committed to source.
 
+## Audit pipeline (71 phases, one skill each)
+
+`phases-audit` walks a fixed sequence of 71 audit phases. **One skill, one
+phase, always** — the order is frozen at import time, and a phase that does not
+apply is still *visited*: it gets a terminal status and a typed reason, and the
+sequence moves to `ordinal + 1`. Nothing is ever dropped.
+
+```bash
+phases-audit pipeline                    # the frozen PHASE N -> skill mapping
+phases-audit tools                       # which local scanners are installed
+phases-audit run --target ../some-repo   # visit all 71 phases
+phases-audit resume run_<id>             # continue at the interrupted ordinal
+```
+
+Each phase runs inside a throwaway stage exposing exactly one `SKILL.md`, with
+`HOME` repointed at that stage; the stage is destroyed before the next phase
+begins. Skill bodies are resolved *by reference* to your local roots — none is
+vendored here.
+
+Statuses: `completed`, `not_applicable`, `degraded`, `failed`, `skipped_license`,
+`skipped_offline`, `missing_skill`. Reasons come from a closed vocabulary
+(`policy_static_only`, `tool_absent`, `signal_absent:<name>`, …) so they can be
+tested rather than merely read.
+
+Defaults, and their honest limits:
+
+* **static_only** — the target's own code is not executed. Pass
+  `--allow-local-test-execution` to run it inside an ephemeral copy.
+* **CodeQL is gated** — PHASE 22 stays in the sequence but reports
+  `skipped_license` until `--enable-codeql` confirms the terms.
+* **No downloads** — commands carry no update/registry flags, and semgrep
+  refuses `--config auto`; with no local rule pack the phase reports
+  `tool_absent` instead of going online.
+* **Secrets are stripped** — provider and registry credentials are removed from
+  every execution-plane environment.
+* **The target is read-only** — fingerprinted before and after; a mutation is a
+  hard failure.
+* **Network isolation is `advisory`, not enforced.** Proxy variables point at a
+  closed port, which stops well-behaved HTTP clients. There is no per-process
+  network namespace here, so a raw socket is *not* blocked. The run says
+  `advisory`; it never claims to be offline.
+* **Missing skill bodies are reported, never substituted** (`missing_skill`).
+
+Nothing in this pipeline publishes: `open-source-readiness` and
+`release-readiness` return a verdict and stop. No remote, no push, no release.
+
 ## Development
 
 ```bash

@@ -27,6 +27,7 @@ Issues = "https://github.com/Cherridsaid/phases-oss/issues"
 [project.scripts]
 phases = "phases_oss.phases:main"
 phases-multidim = "phases_oss.multidim.__main__:main"
+phases-audit = "phases_oss.audit.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

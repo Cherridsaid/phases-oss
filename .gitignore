@@ -29,3 +29,7 @@ env/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Editor / OS / tooling noise
+Desktop.ini
+.swarm/
