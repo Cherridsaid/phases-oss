@@ -305,7 +305,8 @@ aucune publication.
 python run_tests.py     # unittest de la bibliothèque standard, sortie 0 = vert
 ```
 
-Aucune dépendance, aucune étape de construction. Python 3.8+.
+Aucune dépendance, aucune étape de construction. Python 3.9+ (l'intervalle que
+la CI prouve).
 
 ## Licence
 

@@ -289,7 +289,7 @@ Nothing in this pipeline publishes: `open-source-readiness` and
 python run_tests.py     # standard-library unittest, exit 0 = green
 ```
 
-No dependencies, no build step. Python 3.8+.
+No dependencies, no build step. Python 3.9+ (the version range the CI proves).
 
 ## License
 
