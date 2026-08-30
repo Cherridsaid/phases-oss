@@ -1,3 +1,5 @@
+**English** · [Français](README.fr.md)
+
 # phases-oss
 
 
@@ -90,6 +92,23 @@ The real authority lives elsewhere:
 
 Treat the static reviewer as a linter for process discipline, and the hooks as
 guard rails that catch honest mistakes — not as a sandbox.
+
+### What this tool does and does not do
+
+- **It reads local code, read-only.** Nothing here exploits anything, scans a
+  network, performs intrusion testing, or sends a request to a third-party
+  system.
+- **It does not ship the skills.** It assumes a skill library already present on
+  your machine and resolves skill bodies *by reference*. Without that library,
+  the phases concerned report `missing_skill`. This is the limitation that
+  matters most on a fresh install.
+- **Without a model-plane adapter wired in, the guided-review phases report
+  `degraded` / `model_plane_unavailable`.** The pipeline orchestrates; it does
+  not analyse. Read a full run as an ordered, traceable sequence — not as an
+  audit verdict.
+- **CodeQL stays gated.** PHASE 22 remains in the sequence and reports
+  `skipped_license` until `--enable-codeql` confirms the terms. This is
+  deliberate.
 
 ## Install
 

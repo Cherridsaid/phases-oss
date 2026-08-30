@@ -33,3 +33,4 @@ Thumbs.db
 # Editor / OS / tooling noise
 Desktop.ini
 .swarm/
+graphify-out/
