@@ -26,6 +26,32 @@ Both must pass. The CI runs the suite on Ubuntu and Windows across Python 3.9,
 3.11 and 3.13, so `3.9` is the floor: no syntax or standard-library feature
 newer than that.
 
+### The suite runs the scanners you have installed
+
+Worth knowing before you wonder why a test run is slow, or why your antivirus
+just spoke up: `tests/test_audit_fixtures.py` performs a **real** run of the
+audit pipeline over a fixture, and the pipeline executes whichever
+execution-plane tools it finds on your `PATH`. Install `semgrep` and the suite
+will actually run `semgrep` on the fixture.
+
+To see exactly what would be executed on your machine:
+
+```bash
+phases-audit tools     # or: python -m phases_oss.audit.cli tools
+```
+
+Anything reported `"available": false` is never launched — the phase reports
+`tool_absent` instead. That is why the CI, which has none of these tools
+installed, runs the suite several times faster than a developer machine does.
+
+A tool that exists but is refused at launch — an antivirus, an
+application-control policy — is treated as *unavailable here*, not as a
+failure: the run stays green and the phase says why. If you see a scanner get
+blocked, nothing is broken.
+
+None of this reaches the network, and none of it touches anything outside the
+fixture directory.
+
 ## What a good patch looks like
 
 - **One concern per pull request.** A bug fix and a refactor in the same diff
