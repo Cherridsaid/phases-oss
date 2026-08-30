@@ -252,6 +252,13 @@ virgules), jamais commitée dans les sources.
 
 ## Pipeline d'audit (71 phases, un skill chacune)
 
+> **À lire avant que ce nombre ne veuille dire quoi que ce soit.** Sans
+> adaptateur de plan modèle branché, chacune de ces phases rend `degraded` /
+> `model_plane_unavailable` : la séquence est parcourue, ordonnée et tracée,
+> mais aucune analyse n'a lieu. 71 est un nombre de *phases visitées*, jamais un
+> nombre de constats. Voir [Ce que cet outil fait, et ce qu'il ne fait
+> pas](#ce-que-cet-outil-fait-et-ce-quil-ne-fait-pas).
+
 `phases-audit` parcourt une séquence figée de 71 phases d'audit. **Un skill, une
 phase, toujours** — l'ordre est gelé au moment de l'import, et une phase qui ne
 s'applique pas est tout de même *visitée* : elle reçoit un statut terminal et

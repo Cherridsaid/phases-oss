@@ -240,6 +240,13 @@ denylist for the neutrality guard can be supplied out-of-band via
 
 ## Audit pipeline (71 phases, one skill each)
 
+> **Read this before the count means anything to you.** With no model-plane
+> adapter wired in, every one of these phases reports `degraded` /
+> `model_plane_unavailable`: the sequence is walked, ordered and traced, but no
+> analysis takes place. 71 is a number of *phases visited*, never a number of
+> findings. See [What this tool does and does not
+> do](#what-this-tool-does-and-does-not-do).
+
 `phases-audit` walks a fixed sequence of 71 audit phases. **One skill, one
 phase, always** — the order is frozen at import time, and a phase that does not
 apply is still *visited*: it gets a terminal status and a typed reason, and the
