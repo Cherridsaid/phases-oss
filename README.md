@@ -2,6 +2,7 @@
 
 # phases-oss
 
+[![tests](https://github.com/Cherridsaid/phases-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/Cherridsaid/phases-oss/actions/workflows/ci.yml)
 
 ![phases-oss — guardrails for AI coding agents](docs/social.png)
 
