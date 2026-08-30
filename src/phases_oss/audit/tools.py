@@ -195,6 +195,14 @@ def is_available(skill: str) -> bool:
     return spec is not None and resolve_executable(spec) is not None
 
 
+class RulePackMissing(FileNotFoundError):
+    """A rule-driven tool was asked to run with no local rule pack."""
+
+
+class ToolUnavailable(FileNotFoundError):
+    """No executable for this skill is installed on this machine."""
+
+
 def build_command(
     skill: str,
     *,
@@ -205,14 +213,19 @@ def build_command(
 ) -> List[str]:
     """Full argv for ``skill``. Raises KeyError when the skill has no tool."""
     spec = TOOLS[skill]
-    executable = resolve_executable(spec)
-    if executable is None:
-        raise FileNotFoundError("no executable installed for %r" % skill)
+    # Policy first, installation second. "no local rule pack" is a rule of this
+    # project, true on every machine; "not installed" is a property of *this*
+    # machine. Checking the binary first made the policy unreachable — and
+    # untestable — wherever the tool happened to be absent. Both raise
+    # FileNotFoundError, so callers are unaffected by the order.
     if "{rules}" in " ".join(spec.args) and rules is None:
         # No silent "auto": that flag downloads the registry mid-scan.
-        raise FileNotFoundError(
+        raise RulePackMissing(
             "%r needs a local rule pack; none found (set %s)" % (skill, SEMGREP_RULES_ENV)
         )
+    executable = resolve_executable(spec)
+    if executable is None:
+        raise ToolUnavailable("no executable installed for %r" % skill)
     substitutions = {
         "{target}": str(target),
         "{out}": str(out),

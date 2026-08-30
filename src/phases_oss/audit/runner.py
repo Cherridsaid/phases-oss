@@ -183,9 +183,9 @@ class AuditRunner:
         try:
             argv = tools.build_command(spec.skill, target=self.target, out=out, rules=rules)
         except FileNotFoundError as exc:
-            # The binary exists but cannot work offline (no local rule pack).
-            # Reaching the network to fetch one is not an option, so the phase
-            # is skipped and says why.
+            # Either no local rule pack (RulePackMissing) or no installed binary
+            # (ToolUnavailable). Reaching the network to fetch either one is not
+            # an option, so the phase is skipped and the note says which it was.
             return PhaseOutcome(SKIPPED_OFFLINE, "tool_absent", note=str(exc))
         env = guard.execution_env()
         guard.assert_no_secrets(env)

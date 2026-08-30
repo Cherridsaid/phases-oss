@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from phases_oss.audit import guard, overlay, registry, router, runstate, sarif, tools
 from phases_oss.audit.registry import ORDINALS, PHASE_COUNT
@@ -312,15 +313,34 @@ class TestExecutionPlane(unittest.TestCase):
         self.assertIn("raw sockets are NOT blocked", payload["network_note"])
 
     def test_21_semgrep_never_falls_back_to_config_auto(self):
-        # ``--config auto`` downloads the rule registry mid-scan. With no local
-        # pack the command must refuse to be built, not silently go online.
+        # ``--config auto`` downloads the rule registry mid-scan. Three
+        # guarantees, none of which may depend on semgrep being installed here:
+        # the declared command has no path to "auto"; building it without a
+        # local pack is refused *as a rule-pack problem*, not as a missing
+        # binary; and with a pack the argv still never says "auto".
+        self.assertNotIn("auto", " ".join(tools.TOOLS["semgrep"].args))
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.json"
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaises(tools.RulePackMissing):
                 tools.build_command("semgrep", target=Path(tmp), out=out, rules=None)
-            argv = tools.build_command("semgrep", target=Path(tmp), out=out, rules=Path(tmp))
+            # A machine without semgrep must still exercise the argv building.
+            with mock.patch.object(shutil, "which", return_value="/usr/bin/semgrep"):
+                argv = tools.build_command(
+                    "semgrep", target=Path(tmp), out=out, rules=Path(tmp)
+                )
             self.assertNotIn("auto", argv)
             self.assertIn(tmp, argv)
+
+    def test_21_missing_binary_is_reported_as_such(self):
+        # The counterpart: with a rule pack but no executable, the refusal must
+        # name the installation, never the rules.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.json"
+            with mock.patch.object(shutil, "which", return_value=None):
+                with self.assertRaises(tools.ToolUnavailable):
+                    tools.build_command(
+                        "semgrep", target=Path(tmp), out=out, rules=Path(tmp)
+                    )
 
     def test_rule_counts_are_measured_never_hardcoded(self):
         with tempfile.TemporaryDirectory() as tmp:
