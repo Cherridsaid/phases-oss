@@ -14,6 +14,10 @@ name: publish
 on:
   release:
     types: [published]
+  # Manual trigger. A release runs the workflows as they existed *at its tag*,
+  # so a release tagged before this file was added can never trigger it. Rather
+  # than move a published tag, publish that one by hand from the default branch.
+  workflow_dispatch:
 
 permissions:
   contents: read
